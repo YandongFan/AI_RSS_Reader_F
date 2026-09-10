@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "Nature Communication",
+  "enabled": true,
+  "removeSelectors": [],
+  "unwrapSelectors": [],
+  "preserve": {
+    "images": true,
+    "captions": true,
+    "tables": true,
+    "footnotes": true
+  },
+  "restoreProxyLinks": true,
+  "proxyHosts": {
+    "www-nature-com": "www.nature.com",
+    "doi-org": "doi.org"
+  },
+  "replacements": []
+}

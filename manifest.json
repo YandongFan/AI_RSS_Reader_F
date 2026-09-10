@@ -1,0 +1,9 @@
+{
+  "id": "ai-rss-reader-f",
+  "name": "AI RSS Reader F",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "在 Obsidian 中订阅 RSS，并按研究方向使用 AI 筛选和整理文章。",
+  "author": "zflou",
+  "isDesktopOnly": true
+}

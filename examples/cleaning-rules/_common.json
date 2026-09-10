@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "_common",
+  "enabled": true,
+  "removeSelectors": [],
+  "unwrapSelectors": [],
+  "preserve": {
+    "images": true,
+    "captions": true,
+    "tables": true,
+    "footnotes": true
+  },
+  "replacements": []
+}
