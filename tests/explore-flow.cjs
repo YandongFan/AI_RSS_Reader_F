@@ -78,6 +78,54 @@ test('RSS articles survive AI failure and previously discarded links enter explo
   assert.equal(plugin.state.articles.length, 1);
   assert.equal(state.isCurated(plugin.state.articles[0]), false);
 });
+
+test('refresh retries saved AI failures even when feeds fail, then skips completed negatives', async () => {
+  let fetches = 0;
+  let analyses = 0;
+  const progress = [];
+  const { plugin } = pluginHarness({
+    './rss': { fetchAllFeeds: async (feeds, limit, report) => {
+      if (++fetches === 1) return [paper('retry', 'unread')];
+      report({ name: 'offline' }, 'unavailable');
+      return [];
+    } },
+    './ai': { analyzeArticles: async items => {
+      if (++analyses === 1) throw Error('模型返回结果不完整');
+      assert.equal(items.length, 1);
+      return items.map(item => ({ ...item, analysis: { A: { relevant: false, reason: 'complete' } }, matchedProfiles: [] }));
+    } },
+  });
+  plugin.getView = () => ({ setProgress: value => progress.push(value), render() {} });
+  await plugin.refreshFeeds();
+  assert.equal(plugin.running, false);
+  plugin.state.articles[0].savedPath = 'saved.md';
+  await plugin.refreshFeeds();
+  assert.equal(analyses, 2);
+  assert.equal(plugin.state.articles[0].analysis.A.reason, 'complete');
+  assert.equal(plugin.state.articles[0].savedPath, 'saved.md');
+  assert.match(progress.at(-1).message, /分析 1 篇/);
+  assert.doesNotMatch(progress.at(-1).message, /-1/);
+  await plugin.refreshFeeds();
+  assert.equal(analyses, 2);
+  assert.equal(plugin.running, false);
+});
+
+test('refresh ignores concurrent clicks and releases its lock after failure', async () => {
+  let release;
+  let calls = 0;
+  const { plugin, notices } = pluginHarness({ './rss': { fetchAllFeeds: async () => {
+    calls++;
+    await new Promise(resolve => { release = resolve; });
+    throw Error('offline');
+  } } });
+  const first = plugin.refreshFeeds();
+  await plugin.refreshFeeds();
+  assert.equal(calls, 1);
+  assert.ok(notices.includes('RSS 抓取任务正在运行'));
+  release();
+  await first;
+  assert.equal(plugin.running, false);
+});
 test('health check exports after failed probes and import reads that same plugin-root file', async () => {
   const { plugin } = pluginHarness({ './feed-health': { checkAllFeeds: async feeds => feeds.map(feed => ({ feed, ok: false })) } });
   plugin.state.settings.feeds = [{ id: 'a', name: 'A', url: 'https://example.org/rss', enabled: false }];

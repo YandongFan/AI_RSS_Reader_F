@@ -216,13 +216,15 @@ export default class AiRssReaderPlugin extends Plugin {
       this.state.articles = [...fresh, ...this.state.articles];
       await this.saveState();
       const profiles = this.state.settings.profiles.filter((profile) => profile.enabled);
-      report({ phase: 'filter', message: `发现 ${fresh.length} 篇新文章，正在预筛…`, current: 0, total: fresh.length });
+      const pending = this.state.articles.filter(article => !isCurated(article) && Object.keys(article.analysis ?? {}).length === 0);
+      report({ phase: 'filter', message: `发现 ${fresh.length} 篇新文章，${pending.length} 篇待分析，正在预筛…`, current: 0, total: pending.length });
       const candidates = this.state.settings.keywordFilter
-        ? keywordPrefilter(fresh, profiles.map((profile) => `${profile.name} ${profile.description}`))
-        : fresh;
+        ? keywordPrefilter(pending, profiles.map((profile) => `${profile.name} ${profile.description}`))
+        : pending;
 
       let analyzed: RssArticle[] = candidates;
       if (candidates.length > 0) {
+        report({ phase: 'analysis', message: `正在分析 ${candidates.length} 篇文章（含此前未完成的文章）…`, current: 0, total: Math.ceil(candidates.length / Math.max(1, this.state.settings.batchSize)) });
         analyzed = await analyzeArticles(
           candidates,
           profiles,
@@ -244,7 +246,7 @@ export default class AiRssReaderPlugin extends Plugin {
       this.state.lastFetchedAt = new Date().toISOString();
       report({ phase: 'saving', message: '正在保存结果…', current: 1, total: 1 });
       await this.saveState();
-      report({ phase: 'done', message: `完成：精选 ${kept.filter(isCurated).length} 篇，探索 ${fresh.length - kept.filter(isCurated).length} 篇`, current: 1, total: 1 });
+      report({ phase: 'done', message: `完成：新增 ${fresh.length} 篇，分析 ${analyzed.length} 篇，精选 ${kept.filter(isCurated).length} 篇${failures.length ? `；${failures.length} 个源失败` : ''}`, current: 1, total: 1 });
       this.getView()?.render();
       const suffix = failures.length > 0 ? `；${failures.length} 个源失败` : '';
       new Notice(`RSS 更新完成：${fresh.length} 篇新文章，${kept.filter(isCurated).length} 篇精选${suffix}`, 7000);

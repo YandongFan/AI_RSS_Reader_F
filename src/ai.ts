@@ -327,9 +327,23 @@ export async function analyzeArticles(
     const batch = batches[batchIndex];
     const raw = await callModel(provider, buildPrompt(batch, activeProfiles), batch.length, activeProfiles.length);
     const rows = extractJson(raw);
-    const missing = batch.flatMap((_, articleIndex) => activeProfiles
+    const findMissing = () => batch.flatMap((_, articleIndex) => activeProfiles
       .map((__, profileIndex) => ({ articleIndex, profileIndex }))
       .filter(({ articleIndex: id, profileIndex }) => !rows.some((row) => row.id === id && row.profile_idx === profileIndex)));
+    // Retry only omitted pairs, with one direction per request and local IDs.
+    const initialMissing = findMissing();
+    for (let profileIndex = 0; profileIndex < activeProfiles.length; profileIndex += 1) {
+      const omitted = initialMissing.filter(item => item.profileIndex === profileIndex);
+      if (omitted.length === 0) continue;
+      const retryBatch = omitted.map(item => batch[item.articleIndex]);
+      const retryRows = extractJson(await callModel(provider, buildPrompt(retryBatch, [activeProfiles[profileIndex]]), retryBatch.length, 1));
+      for (const row of retryRows) {
+        if (row.profile_idx === 0 && row.id >= 0 && row.id < omitted.length) {
+          rows.push({ ...row, id: omitted[row.id].articleIndex, profile_idx: profileIndex });
+        }
+      }
+    }
+    const missing = findMissing();
     if (missing.length > 0) {
       const preview = missing.slice(0, 4).map(({ articleIndex, profileIndex }) => `${articleIndex}/${profileIndex}`).join(', ');
       throw new Error(`模型返回结果不完整，缺少 id/profile_idx：${preview}${missing.length > 4 ? '…' : ''}`);

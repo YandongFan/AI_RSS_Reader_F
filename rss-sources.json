@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "checkedAt": "2026-09-10T07:40:39.751Z",
+  "checkedAt": "2026-09-10T11:29:30.573Z",
   "feeds": [
     {
       "name": "arXiv · Artificial Intelligence",
@@ -106,7 +106,7 @@
     },
     {
       "name": "Nano Letters",
-      "url": "https://pubs.acs.org/action/showFeed?feed=rss&jc=nalefd&type=etoc",
+      "url": "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=nalefd",
       "enabled": true,
       "health": "failed"
     },
@@ -125,6 +125,36 @@
     {
       "name": "Scientific Reports",
       "url": "https://www.nature.com/srep.rss",
+      "enabled": true,
+      "health": "ok"
+    },
+    {
+      "name": "PNAS",
+      "url": "https://www.pnas.org/action/showFeed?type=etoc&feed=rss&jc=pnas",
+      "enabled": true,
+      "health": "ok"
+    },
+    {
+      "name": "Advanced Functional Materials",
+      "url": "https://onlinelibrary.wiley.com/action/showFeed?jc=adfm&type=etoc&feed=rss",
+      "enabled": true,
+      "health": "failed"
+    },
+    {
+      "name": "Photonics Research",
+      "url": "https://opg.optica.org/rss/prj_feed.xml",
+      "enabled": true,
+      "health": "ok"
+    },
+    {
+      "name": "Laser & Photonics Reviews",
+      "url": "https://onlinelibrary.wiley.com/action/showFeed?jc=lpor&type=etoc&feed=rss",
+      "enabled": true,
+      "health": "failed"
+    },
+    {
+      "name": "eLight",
+      "url": "https://link.springer.com/search.rss?facet-journal-id=43593",
       "enabled": true,
       "health": "ok"
     }
