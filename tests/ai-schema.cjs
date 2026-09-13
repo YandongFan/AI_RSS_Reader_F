@@ -55,6 +55,73 @@ test('incomplete recovery stops after one retry per direction instead of inventi
   assert.equal(calls, 3);
 });
 
+test('truncated three-direction output splits directions then articles and remaps local IDs', async () => {
+  const directions = [...profiles, { name: 'C', description: 'gamma', enabled: true }];
+  const requests = [];
+  const api = loadAi(async request => {
+    const prompt = JSON.parse(request.body).messages[0].content;
+    requests.push(prompt);
+    const ids = [...prompt.matchAll(/^ID (\d+)$/gm)];
+    const multiProfile = prompt.includes('1: B');
+    const direction = /0: ([ABC]) —/.exec(prompt)[1];
+    const output = multiProfile || ids.length > 1
+      ? '[{"id":0,"profile_idx":0,"relevant":false,"reason":"truncated'
+      : JSON.stringify([{ id: 0, profile_idx: 0, relevant: direction === 'C', reason: `${direction}: ${/Title: (Paper \d)/.exec(prompt)[1]}` }]);
+    return { status: 200, json: { choices: [{ message: { content: output }, finish_reason: multiProfile ? 'length' : 'stop' }] } };
+  });
+  const progress = [];
+  const result = await api.analyzeArticles(articles, directions, provider, 10, (done, total) => progress.push([done, total]));
+  assert.equal(requests.length, 10);
+  for (let index = 0; index < result.length; index++) {
+    for (const name of ['A', 'B', 'C']) assert.equal(result[index].analysis[name].reason, `${name}: Paper ${index}`);
+    assert.deepEqual(Array.from(result[index].matchedProfiles), ['C']);
+  }
+  assert.deepEqual(progress, [[1, 1]]);
+});
+
+test('malformed single-pair output retries once and accepts only a valid replacement', async () => {
+  let calls = 0;
+  const api = loadAi(async () => ({ status: 200, json: { choices: [{ message: { content: ++calls === 1
+    ? '[{"id":0,"profile_idx":0,"relevant":true,"reason":"unescaped " quote"}]'
+    : JSON.stringify([{ id: 0, profile_idx: 0, relevant: false, reason: 'valid replacement' }]) } }] } }));
+  const result = await api.analyzeArticles(articles.slice(0, 1), profiles.slice(0, 1), provider, 1);
+  assert.equal(calls, 2);
+  assert.equal(result[0].analysis.A.relevant, false);
+  assert.equal(result[0].analysis.A.reason, 'valid replacement');
+});
+
+test('persistent malformed output terminates at a single pair without modifying articles', async () => {
+  let calls = 0;
+  const before = JSON.stringify(articles);
+  const api = loadAi(async () => {
+    calls++;
+    return { status: 200, json: { choices: [{ message: { content: '[{"id":0' } }] } };
+  });
+  await assert.rejects(api.analyzeArticles(articles, [...profiles, { name: 'C', enabled: true }], provider, 10), /单篇／单方向重试后仍无法解析/);
+  assert.equal(calls, 4);
+  assert.equal(JSON.stringify(articles), before);
+});
+
+test('HTTP errors are not retried as formatting failures', async () => {
+  let calls = 0;
+  const api = loadAi(async () => { calls++; return { status: 429, text: 'rate limited' }; });
+  await assert.rejects(api.analyzeArticles(articles, profiles, provider, 10), /429/);
+  assert.equal(calls, 1);
+});
+
+test('format recovery also applies to requests for missing pairs', async () => {
+  const outputs = [
+    JSON.stringify([{ id: 0, profile_idx: 0, relevant: true, reason: 'original' }]),
+    '[{"id":',
+    JSON.stringify([{ id: 0, profile_idx: 0, relevant: false, reason: 'recovered' }]),
+  ];
+  const api = loadAi(async () => ({ status: 200, json: { choices: [{ message: { content: outputs.shift() } }] } }));
+  const result = await api.analyzeArticles(articles.slice(0, 1), profiles, provider, 10);
+  assert.equal(outputs.length, 0);
+  assert.equal(result[0].analysis.A.reason, 'original');
+  assert.equal(result[0].analysis.B.reason, 'recovered');
+});
+
 test('generic text generation preserves Markdown returned by compatible providers', async () => {
   let request;
   const api = loadAi(async value => {

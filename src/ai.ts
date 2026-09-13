@@ -9,6 +9,8 @@ interface ModelEvaluation {
   reason: string;
 }
 
+class EvaluationFormatError extends Error {}
+
 function isEvaluation(value: unknown): value is ModelEvaluation {
   if (!value || typeof value !== 'object') return false;
   const row = value as Record<string, unknown>;
@@ -66,7 +68,7 @@ function jsonCandidates(text: string): string[] {
 }
 
 function extractJson(text: string): ModelEvaluation[] {
-  if (!text.trim()) throw new Error('模型返回了空内容');
+  if (!text.trim()) throw new EvaluationFormatError('模型返回了空内容');
   for (const candidate of jsonCandidates(text)) {
     try {
       const rows = findEvaluationArray(JSON.parse(candidate) as unknown);
@@ -75,7 +77,7 @@ function extractJson(text: string): ModelEvaluation[] {
       // Some compatible APIs add prose around an otherwise valid JSON value.
     }
   }
-  throw new Error(`无法解析模型返回的 JSON：${text.replace(/\s+/g, ' ').slice(0, 160)}`);
+  throw new EvaluationFormatError('无法解析模型返回的 JSON，内容可能被截断或格式不正确');
 }
 
 function contentText(value: unknown): string {
@@ -305,6 +307,44 @@ reason 必须使用中文，用一句简洁、连贯的话先概括论文研究�
 省略号仅表示需要填写的内容，实际输出必须替换为有依据的具体内容，不得为空或使用占位符；不要添加标题、列表、评分或额外解释。`;
 }
 
+async function requestEvaluations(
+  articles: RssArticle[],
+  profiles: ResearchProfile[],
+  provider: ProviderSettings,
+): Promise<ModelEvaluation[]> {
+  // Keep transport/authentication failures outside format recovery.
+  const raw = await callModel(provider, buildPrompt(articles, profiles), articles.length, profiles.length);
+  try {
+    return extractJson(raw);
+  } catch (error) {
+    if (!(error instanceof EvaluationFormatError)) throw error;
+    if (profiles.length > 1) {
+      const rows: ModelEvaluation[] = [];
+      for (let index = 0; index < profiles.length; index += 1) {
+        const results = await requestEvaluations(articles, [profiles[index]], provider);
+        rows.push(...results.filter(row => row.profile_idx === 0).map(row => ({ ...row, profile_idx: index })));
+      }
+      return rows;
+    }
+    if (articles.length > 1) {
+      const middle = Math.ceil(articles.length / 2);
+      const left = await requestEvaluations(articles.slice(0, middle), profiles, provider);
+      const right = await requestEvaluations(articles.slice(middle), profiles, provider);
+      return [
+        ...left.filter(row => row.id >= 0 && row.id < middle),
+        ...right.filter(row => row.id >= 0 && row.id < articles.length - middle).map(row => ({ ...row, id: row.id + middle })),
+      ];
+    }
+    const retry = await callModel(provider, buildPrompt(articles, profiles), 1, 1);
+    try {
+      return extractJson(retry);
+    } catch (retryError) {
+      if (!(retryError instanceof EvaluationFormatError)) throw retryError;
+      throw new EvaluationFormatError(`单篇／单方向重试后仍无法解析模型返回的 JSON（${profiles[0].name}）。请检查当前模型的结构化输出能力或更换模型后重试。`);
+    }
+  }
+}
+
 export async function analyzeArticles(
   articles: RssArticle[],
   profiles: ResearchProfile[],
@@ -325,8 +365,7 @@ export async function analyzeArticles(
   const output: RssArticle[] = [];
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
     const batch = batches[batchIndex];
-    const raw = await callModel(provider, buildPrompt(batch, activeProfiles), batch.length, activeProfiles.length);
-    const rows = extractJson(raw);
+    const rows = await requestEvaluations(batch, activeProfiles, provider);
     const findMissing = () => batch.flatMap((_, articleIndex) => activeProfiles
       .map((__, profileIndex) => ({ articleIndex, profileIndex }))
       .filter(({ articleIndex: id, profileIndex }) => !rows.some((row) => row.id === id && row.profile_idx === profileIndex)));
@@ -336,7 +375,7 @@ export async function analyzeArticles(
       const omitted = initialMissing.filter(item => item.profileIndex === profileIndex);
       if (omitted.length === 0) continue;
       const retryBatch = omitted.map(item => batch[item.articleIndex]);
-      const retryRows = extractJson(await callModel(provider, buildPrompt(retryBatch, [activeProfiles[profileIndex]]), retryBatch.length, 1));
+      const retryRows = await requestEvaluations(retryBatch, [activeProfiles[profileIndex]], provider);
       for (const row of retryRows) {
         if (row.profile_idx === 0 && row.id >= 0 && row.id < omitted.length) {
           rows.push({ ...row, id: omitted[row.id].articleIndex, profile_idx: profileIndex });
