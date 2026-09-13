@@ -1,4 +1,5 @@
 import { RSS_SOURCE_FILE, serializeFeedSources, importFeedSources } from './feed-file';
+import { addZoteroFileMenu } from './zotero-import';
 import { checkAllFeeds, type FeedHealthResult } from './feed-health';
 import { articleStatus, setArticleStatus, isCurated, recommendationArticles } from './article-state';
 import { buildRecommendations, recommendationFingerprint } from './recommendation';
@@ -87,6 +88,7 @@ export default class AiRssReaderPlugin extends Plugin {
       },
     });
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file) => {
+      addZoteroFileMenu(this.app, menu, file, this.state.articles);
       this.addMinerUFileMenu(menu, file);
       if (file instanceof TFile) this.addAudioTutorFileMenu(menu, file);
     }));
