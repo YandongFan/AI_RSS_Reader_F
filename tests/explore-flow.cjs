@@ -110,6 +110,29 @@ test('refresh retries saved AI failures even when feeds fail, then skips complet
   assert.equal(plugin.running, false);
 });
 
+test('refresh checkpoints survive failure and the next refresh only analyzes unfinished papers', async () => {
+  let calls = 0;
+  const { plugin } = pluginHarness({
+    './rss': { fetchAllFeeds: async () => [paper('done', 'unread'), paper('pending', 'unread')] },
+    './ai': { analyzeArticles: async (items, profiles, provider, size, progress, checkpoint) => {
+      if (++calls === 1) {
+        await checkpoint([{ ...items[0], analysis: { A: { relevant: false, reason: 'complete' } }, matchedProfiles: [] }]);
+        throw Error('missing pair');
+      }
+      assert.deepEqual(items.map(item => item.id), ['pending']);
+      return items.map(item => ({ ...item, analysis: { A: { relevant: true, reason: 'recovered' } }, matchedProfiles: ['A'] }));
+    } },
+  });
+  let saved;
+  plugin.saveState = async () => { saved = structuredClone(plugin.state.articles); };
+  await plugin.refreshFeeds();
+  assert.equal(plugin.running, false);
+  assert.equal(saved.find(item => item.id === 'done').analysis.A.reason, 'complete');
+  await plugin.refreshFeeds();
+  assert.equal(calls, 2);
+  assert.equal(plugin.state.articles.find(item => item.id === 'pending').curated, true);
+});
+
 test('refresh ignores concurrent clicks and releases its lock after failure', async () => {
   let release;
   let calls = 0;

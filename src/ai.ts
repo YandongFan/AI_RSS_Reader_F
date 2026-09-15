@@ -351,6 +351,7 @@ export async function analyzeArticles(
   provider: ProviderSettings,
   batchSize: number,
   onBatch?: (completed: number, total: number) => void,
+  onResults?: (articles: RssArticle[]) => Promise<void>,
 ): Promise<RssArticle[]> {
   const activeProfiles = profiles.filter((profile) => profile.enabled);
   if (activeProfiles.length === 0) throw new Error('请至少启用一个研究方向');
@@ -363,6 +364,7 @@ export async function analyzeArticles(
   }
 
   const output: RssArticle[] = [];
+  const incomplete: string[] = [];
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
     const batch = batches[batchIndex];
     const rows = await requestEvaluations(batch, activeProfiles, provider);
@@ -382,12 +384,20 @@ export async function analyzeArticles(
         }
       }
     }
-    const missing = findMissing();
-    if (missing.length > 0) {
-      const preview = missing.slice(0, 4).map(({ articleIndex, profileIndex }) => `${articleIndex}/${profileIndex}`).join(', ');
-      throw new Error(`模型返回结果不完整，缺少 id/profile_idx：${preview}${missing.length > 4 ? '…' : ''}`);
+    // A direction-level retry can still omit papers. Make one final isolated request per pair.
+    for (const { articleIndex, profileIndex } of findMissing()) {
+      const raw = await callModel(provider, buildPrompt([batch[articleIndex]], [activeProfiles[profileIndex]]), 1, 1);
+      try {
+        const row = extractJson(raw).find(item => item.id === 0 && item.profile_idx === 0);
+        if (row) rows.push({ ...row, id: articleIndex, profile_idx: profileIndex });
+      } catch (error) {
+        if (!(error instanceof EvaluationFormatError)) throw error;
+      }
     }
+    const missing = findMissing();
+    const completed: RssArticle[] = [];
     for (let articleIndex = 0; articleIndex < batch.length; articleIndex += 1) {
+      if (missing.some(item => item.articleIndex === articleIndex)) continue;
       const article = batch[articleIndex];
       const analysis: Record<string, AnalysisResult> = {};
       const matchedProfiles: string[] = [];
@@ -397,9 +407,18 @@ export async function analyzeArticles(
         analysis[profile.name] = result;
         if (result.relevant) matchedProfiles.push(profile.name);
       });
-      output.push({ ...article, analysis, matchedProfiles });
+      completed.push({ ...article, analysis, matchedProfiles });
+    }
+    output.push(...completed);
+    if (completed.length > 0) await onResults?.(completed);
+    if (missing.length > 0) {
+      const preview = missing.slice(0, 4).map(({ articleIndex, profileIndex }) => `${articleIndex}/${profileIndex}`).join(', ');
+      incomplete.push(`批次 ${batchIndex + 1}：${preview}${missing.length > 4 ? '…' : ''}`);
     }
     onBatch?.(batchIndex + 1, batches.length);
+  }
+  if (incomplete.length > 0) {
+    throw new Error(`模型返回结果不完整，缺少 id/profile_idx（${incomplete.slice(0, 4).join('；')}${incomplete.length > 4 ? '…' : ''}）。${onResults ? `已保存 ${output.length} 篇完整结果，再次更新可重试未完成文章。` : '请重试或更换模型。'}`);
   }
   return output;
 }

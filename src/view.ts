@@ -152,13 +152,14 @@ export class AiRssView extends ItemView {
     root.querySelector('.ai-rss-list')?.remove();
     const list = root.createDiv({ cls: 'ai-rss-list' });
     const query = this.query.trim().toLowerCase();
+    const sort = this.plugin.state.curatedSort ?? { key: this.plugin.state.articleSort ?? 'relevance', reversed: false };
     const articles = sortArticles(this.plugin.state.articles.filter((article) => {
       if (!isCurated(article)) return false;
       if (articleStatus(article) !== this.readFilter) return false;
       if (this.profile && !article.matchedProfiles.includes(this.profile)) return false;
       if (query && !`${article.title} ${article.summary} ${article.source}`.toLowerCase().includes(query)) return false;
       return true;
-    }), this.plugin.state.articleSort ?? 'relevance', this.scores);
+    }), sort.key, this.scores, sort.reversed);
     const visibleIds = new Set(articles.map(article => article.id));
     this.selectedIds.forEach(id => { if (!visibleIds.has(id)) this.selectedIds.delete(id); });
 
@@ -168,9 +169,14 @@ export class AiRssView extends ItemView {
     const sorting = list.createDiv({ cls: 'ai-rss-table-toolbar' });
     const sorts: [ArticleSort, string][] = [['title', '按标题'], ['updated', '按更新时间'], ['journal', '按期刊'], ['relevance', '按相关度']];
     sorts.forEach(([key, label]) => {
-      const button = sorting.createEl('button', { text: label, cls: (this.plugin.state.articleSort ?? 'relevance') === key ? 'mod-cta' : '' });
+      const active = sort.key === key;
+      const ascending = (key === 'title' || key === 'journal') !== sort.reversed;
+      const button = sorting.createEl('button', { text: `${label}${active ? ascending ? ' ↑' : ' ↓' : ''}`, cls: active ? 'mod-cta' : '' });
+      button.dataset.sort = key;
+      button.setAttribute('aria-pressed', String(active));
+      button.title = active ? `当前${ascending ? '升序' : '降序'}，再次点击反转排序` : '点击切换排序方式';
       button.addEventListener('click', () => {
-        this.plugin.state.articleSort = key;
+        this.plugin.state.curatedSort = { key, reversed: active ? !sort.reversed : false };
         this.selectionAnchorId = undefined;
         void this.plugin.saveState();
         this.renderArticles(root, true);

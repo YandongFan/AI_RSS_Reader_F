@@ -45,14 +45,70 @@ test('missing pairs are retried by direction with local IDs and preserve existin
   assert.equal(result[1].analysis.A.reason, 'original');
 });
 
-test('incomplete recovery stops after one retry per direction instead of inventing negatives', async () => {
+test('incomplete recovery stops after direction and isolated retries instead of inventing negatives', async () => {
   let calls = 0;
   const api = loadAi(async () => {
     calls++;
     return { status: 200, json: { choices: [{ message: { content: '[]' } }] } };
   });
   await assert.rejects(api.analyzeArticles(articles, profiles, provider, 10), /模型返回结果不完整/);
+  assert.equal(calls, 7);
+});
+
+test('recovers pair 7/2 after a direction retry still omits it', async () => {
+  const papers = Array.from({ length: 8 }, (_, id) => ({ ...articles[0], id: String(id), title: `Paper ${id}` }));
+  const directions = [...profiles, { name: 'C', description: 'gamma', enabled: true }];
+  let calls = 0;
+  const api = loadAi(async request => {
+    const prompt = JSON.parse(request.body).messages[0].content;
+    calls++;
+    const rows = calls === 1 ? papers.flatMap((_, id) => directions.flatMap((__, profile_idx) => id === 7 && profile_idx === 2 ? [] : [{ id, profile_idx, relevant: false, reason: 'complete' }]))
+      : calls === 2 ? [] : [{ id: 0, profile_idx: 0, relevant: true, reason: 'recovered C' }];
+    if (calls > 1) { assert.match(prompt, /ID 0\nTitle: Paper 7/); assert.match(prompt, /0: C/); }
+    return { status: 200, json: { choices: [{ message: { content: JSON.stringify(rows) } }] } };
+  });
+  const result = await api.analyzeArticles(papers, directions, provider, 8);
   assert.equal(calls, 3);
+  assert.equal(result[7].analysis.C.reason, 'recovered C');
+  assert.deepEqual(Array.from(result[7].matchedProfiles), ['C']);
+});
+
+test('persistent missing pair checkpoints complete articles without inventing the missing result', async () => {
+  let calls = 0;
+  const saved = [];
+  const api = loadAi(async () => {
+    const rows = ++calls === 1 ? [{ id: 0, profile_idx: 0, relevant: false, reason: 'complete' }] : [];
+    return { status: 200, json: { choices: [{ message: { content: JSON.stringify(rows) } }] } };
+  });
+  await assert.rejects(api.analyzeArticles(articles, profiles.slice(0, 1), provider, 2, undefined, async items => saved.push(...items)), /已保存 1 篇/);
+  assert.equal(calls, 3);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].id, '0');
+  assert.equal(saved[0].analysis.A.relevant, false);
+  assert.deepEqual(articles[1].analysis, {});
+});
+
+test('a missing pair in an early batch does not block checkpointing a later batch', async () => {
+  let calls = 0;
+  const saved = [];
+  const api = loadAi(async () => {
+    const rows = ++calls <= 3 ? [] : [{ id: 0, profile_idx: 0, relevant: true, reason: 'later complete' }];
+    return { status: 200, json: { choices: [{ message: { content: JSON.stringify(rows) } }] } };
+  });
+  await assert.rejects(api.analyzeArticles(articles, profiles.slice(0, 1), provider, 1, undefined, async items => saved.push(...items)), /已保存 1 篇/);
+  assert.equal(calls, 4);
+  assert.equal(saved[0].id, '1');
+});
+
+test('a later API failure does not undo a completed batch checkpoint', async () => {
+  let calls = 0;
+  const saved = [];
+  const api = loadAi(async () => ++calls === 1
+    ? { status: 200, json: { choices: [{ message: { content: '[{"id":0,"profile_idx":0,"relevant":true,"reason":"complete"}]' } }] } }
+    : { status: 429, text: 'rate limited' });
+  await assert.rejects(api.analyzeArticles(articles, profiles.slice(0, 1), provider, 1, undefined, async items => saved.push(...items)), /429/);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].id, '0');
 });
 
 test('truncated three-direction output splits directions then articles and remaps local IDs', async () => {

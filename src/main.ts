@@ -233,6 +233,14 @@ export default class AiRssReaderPlugin extends Plugin {
           this.state.settings.provider,
           this.state.settings.batchSize,
           (current, total) => report({ phase: 'analysis', message: `AI 分析批次 ${current}/${total}`, current, total }),
+          async completed => {
+            const results = new Map(completed.map(article => [article.link, article]));
+            this.state.articles = this.state.articles.map(article => {
+              const result = results.get(article.link);
+              return result ? { ...article, analysis: result.analysis, matchedProfiles: result.matchedProfiles, curated: result.matchedProfiles.length > 0 } : article;
+            });
+            await this.saveState();
+          },
         );
       }
 

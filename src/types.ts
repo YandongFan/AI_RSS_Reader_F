@@ -135,6 +135,7 @@ export interface PluginState {
   recommendationOptions?: { disabledKeywords: string[]; lowThreshold: number | null; highThreshold: number | null; userInterest: string };
   recommendations?: RecommendationState;
   articleSort?: ArticleSort;
+  curatedSort?: { key: ArticleSort; reversed: boolean };
   settings: AiRssSettings;
   articles: RssArticle[];
   seenLinks: string[];

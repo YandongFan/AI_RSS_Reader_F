@@ -27,7 +27,7 @@ export function setArticleStatus(article: RssArticle, status: ArticleStatus, now
 
 const time = (value?: string): number => Date.parse(value ?? '') || 0;
 
-export function sortArticles(articles: RssArticle[], sort: ArticleSort, scores: Record<string, RecommendationScore> = {}): RssArticle[] {
+export function sortArticles(articles: RssArticle[], sort: ArticleSort, scores: Record<string, RecommendationScore> = {}, reversed = false): RssArticle[] {
   const tiers = { high: 0, pending: 1, low: 3 };
   return [...articles].sort((a, b) => {
     let order = 0;
@@ -38,6 +38,7 @@ export function sortArticles(articles: RssArticle[], sort: ArticleSort, scores: 
       const left = scores[a.id]; const right = scores[b.id];
       order = (left ? tiers[left.tier] : 2) - (right ? tiers[right.tier] : 2) || (right?.score ?? -1) - (left?.score ?? -1);
     }
-    return order || time(b.published || b.fetchedAt) - time(a.published || a.fetchedAt) || b.id.localeCompare(a.id);
+    const result = order || time(b.published || b.fetchedAt) - time(a.published || a.fetchedAt) || b.id.localeCompare(a.id);
+    return reversed ? -result : result;
   });
 }

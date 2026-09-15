@@ -69,6 +69,9 @@ test('four sorts have deterministic order without changing stored order', () => 
   const scores = { a: { tier: 'low', score: 20 }, b: { tier: 'high', score: 85 }, c: { tier: 'pending', score: 50 } };
   const original = [a, b, c, d];
   assert.deepEqual(sortArticles(original, 'relevance', scores).map(x => x.id), ['b', 'c', 'd', 'a']);
+  for (const key of ['title', 'journal', 'updated', 'relevance']) {
+    assert.deepEqual(sortArticles(original, key, scores, true).map(x => x.id), sortArticles(original, key, scores).map(x => x.id).reverse());
+  }
   assert.deepEqual(original.map(x => x.id), ['a', 'b', 'c', 'd']);
 });
 
@@ -142,6 +145,30 @@ test('reader renders five categories, image column, sorting and empty-basket und
   const titleSort = [...root.querySelectorAll('button')].find(button => button.textContent === '按标题');
   titleSort.click();
   assert.equal(root.querySelector('tbody tr').dataset.articleId, 'a');
+  const clickSort = key => root.querySelector(`[data-sort="${key}"]`).click();
+  clickSort('title');
+  assert.equal(root.querySelector('tbody tr').dataset.articleId, 'b');
+  assert.match(root.querySelector('[data-sort="title"]').textContent, /↓/);
+  clickSort('title');
+  assert.equal(root.querySelector('tbody tr').dataset.articleId, 'a');
+  articles[0].updatedAt = '2026-09-10'; articles[1].updatedAt = '2026-09-08';
+  articles[0].source = 'Beta'; articles[1].source = 'Alpha';
+  view.scores = { a: { tier: 'high', score: 90, terms: [] }, b: { tier: 'low', score: 10, terms: [] } };
+  for (const [key, first, second] of [['updated', 'b', 'a'], ['journal', 'a', 'b'], ['relevance', 'a', 'b']]) {
+    clickSort(key);
+    assert.equal(root.querySelector('tbody tr').dataset.articleId, first);
+    clickSort(key);
+    assert.equal(root.querySelector('tbody tr').dataset.articleId, second);
+    assert.equal(root.querySelector(`[data-sort="${key}"]`).getAttribute('aria-pressed'), 'true');
+  }
+  assert.equal(plugin.state.articleSort, undefined, 'curated sorting does not change exploration sorting');
+  clickSort('title');
+  assert.equal(root.querySelector('tbody tr').dataset.articleId, 'a', 'switching resets to default order');
+  clickSort('title');
+  const reopened = new AiRssView({}, { ...plugin, state: JSON.parse(JSON.stringify(plugin.state)) });
+  reopened.contentEl = document.createElement('div');
+  reopened.render();
+  assert.equal(reopened.contentEl.querySelector('tbody tr').dataset.articleId, 'b', 'saved descending order survives reopening');
   root.querySelector('[data-metric="hidden"]').click();
   assert.equal(root.querySelectorAll('tbody tr').length, 0);
   const undo = [...root.querySelectorAll('button')].find(button => button.textContent === '撤回分类');
