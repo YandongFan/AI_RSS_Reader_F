@@ -11,6 +11,7 @@ function load(name) {
 const feedFile = load('feed-file');
 const state = load('article-state');
 const rec = load('recommendation');
+const profileReanalysis = load('profile-reanalysis');
 const paper = (id, status, title = id) => ({ id, status, title, read: status !== 'unread', link: `https://example.org/${id}`, summary: '', source: '', matchedProfiles: [], fetchedAt: new Date().toISOString() });
 const samples = () => [paper('p1', 'interested', 'quantum superconductivity'), paper('p2', 'archived', 'quantum superconductivity'), paper('n1', 'hidden', 'marine ecology'), paper('n2', 'expired', 'marine ecology'), paper('u1', 'unread', 'quantum superconductivity')];
 
@@ -60,6 +61,7 @@ function pluginHarness(extra = {}) {
   const imports = {
     obsidian: { Plugin: class {}, Notice: class { constructor(value) { notices.push(value); } }, normalizePath: value => value },
     './article-state': state, './recommendation': rec, './feed-file': feedFile,
+    './profile-reanalysis': profileReanalysis,
     './ezproxy': { EzProxyLogin: class {} },
     ...extra,
   };
@@ -70,44 +72,83 @@ function pluginHarness(extra = {}) {
   plugin.getView = () => undefined; plugin.saveState = async () => {};
   return { plugin, notices };
 }
-test('RSS articles survive AI failure and previously discarded links enter exploration', async () => {
+test('curated refresh does not add exploration articles when AI analysis fails', async () => {
   const fresh = paper('new', 'unread');
   const { plugin } = pluginHarness({ './rss': { fetchAllFeeds: async () => [fresh] }, './ai': { analyzeArticles: async () => { throw Error('offline'); } } });
   plugin.state.seenLinks = [fresh.link];
-  await plugin.refreshFeeds();
-  assert.equal(plugin.state.articles.length, 1);
-  assert.equal(state.isCurated(plugin.state.articles[0]), false);
+  await plugin.refreshCuratedFeeds();
+  assert.equal(plugin.state.articles.length, 0);
 });
 
-test('refresh retries saved AI failures even when feeds fail, then skips completed negatives', async () => {
-  let fetches = 0;
-  let analyses = 0;
+test('curated refresh preserves exploration entries and only adds matched articles', async () => {
+  const explore = paper('explore', 'unread');
+  let recommendationCalls = 0;
   const progress = [];
   const { plugin } = pluginHarness({
-    './rss': { fetchAllFeeds: async (feeds, limit, report) => {
-      if (++fetches === 1) return [paper('retry', 'unread')];
-      report({ name: 'offline' }, 'unavailable');
-      return [];
-    } },
+    './rss': { fetchAllFeeds: async () => [paper('match', 'unread'), paper('reject', 'unread')] },
     './ai': { analyzeArticles: async items => {
-      if (++analyses === 1) throw Error('模型返回结果不完整');
-      assert.equal(items.length, 1);
-      return items.map(item => ({ ...item, analysis: { A: { relevant: false, reason: 'complete' } }, matchedProfiles: [] }));
+      assert.equal(items.length, 2);
+      return items.map(item => ({ ...item, analysis: { A: { relevant: item.id === 'match', reason: 'complete' } }, matchedProfiles: item.id === 'match' ? ['A'] : [] }));
     } },
   });
+  plugin.state.articles = [explore];
+  plugin.updateRecommendations = async () => { recommendationCalls++; };
   plugin.getView = () => ({ setProgress: value => progress.push(value), render() {} });
-  await plugin.refreshFeeds();
-  assert.equal(plugin.running, false);
-  plugin.state.articles[0].savedPath = 'saved.md';
-  await plugin.refreshFeeds();
+  await plugin.refreshCuratedFeeds();
+  assert.deepEqual(plugin.state.articles.map(item => item.id).sort(), ['explore', 'match']);
+  assert.equal(state.isCurated(plugin.state.articles.find(item => item.id === 'match')), true);
+  assert.equal(state.isCurated(plugin.state.articles.find(item => item.id === 'explore')), false);
+  assert.equal(recommendationCalls, 0);
+  assert.match(progress.at(-1).message, /精选更新完成/);
+});
+
+test('exploration refresh stores feed articles without AI analysis or recommendation work', async () => {
+  let analysisCalls = 0;
+  let recommendationCalls = 0;
+  const { plugin } = pluginHarness({
+    './rss': { fetchAllFeeds: async () => [paper('explore-new', 'unread')] },
+    './ai': { analyzeArticles: async () => { analysisCalls++; return []; } },
+  });
+  plugin.updateRecommendations = async () => { recommendationCalls++; };
+  await plugin.refreshExploreFeeds();
+  assert.deepEqual(plugin.state.articles.map(item => item.id), ['explore-new']);
+  assert.equal(state.isCurated(plugin.state.articles[0]), false);
+  assert.equal(analysisCalls, 0);
+  assert.equal(recommendationCalls, 0);
+});
+
+test('changed research directions reanalyze recent RSS papers until a full run succeeds', async () => {
+  const now = Date.now();
+  const recent = { ...paper('recent', 'unread'), fetchedAt: new Date(now - 3600000).toISOString(), curated: true, analysis: { Old: { relevant: true, reason: 'old' } }, matchedProfiles: ['Old'] };
+  const old = { ...paper('old', 'unread'), fetchedAt: new Date(now - 2 * 86400000).toISOString(), curated: true, analysis: { Old: { relevant: true, reason: 'old' } }, matchedProfiles: ['Old'] };
+  const manual = { ...paper('manual', 'unread'), fetchedAt: new Date(now - 3600000).toISOString(), source: '手动导入', curated: true, analysis: { Old: { relevant: true, reason: 'old' } }, matchedProfiles: ['Old'] };
+  const previousProfiles = [{ id: 'p', name: 'Direction', description: 'old', enabled: true }];
+  const currentProfiles = [{ ...previousProfiles[0], description: 'new' }];
+  let analyses = 0;
+  const { plugin } = pluginHarness({
+    './rss': { fetchAllFeeds: async () => [], keywordPrefilter: items => { assert.equal(items.length, 0); return []; } },
+    './ai': { analyzeArticles: async items => {
+      analyses++;
+      assert.deepEqual(items.map(item => item.id), ['recent']);
+      if (analyses === 1) throw Error('temporary model failure');
+      return items.map(item => ({ ...item, analysis: { Direction: { relevant: false, reason: 'new result' } }, matchedProfiles: [] }));
+    } },
+  });
+  plugin.state.articles = [recent, old, manual];
+  plugin.state.settings = { ...plugin.state.settings, profiles: currentProfiles, keywordFilter: false, profileReanalysisDays: 1, batchSize: 8 };
+  // Turn keyword filtering on after ordinary pending selection has been made irrelevant by full existing analyses.
+  plugin.state.settings.keywordFilter = true;
+  plugin.state.analysisProfileFingerprint = profileReanalysis.researchProfileFingerprint(previousProfiles);
+  await plugin.refreshCuratedFeeds();
+  assert.equal(plugin.state.analysisProfileFingerprint, profileReanalysis.researchProfileFingerprint(previousProfiles));
+  await plugin.refreshCuratedFeeds();
   assert.equal(analyses, 2);
-  assert.equal(plugin.state.articles[0].analysis.A.reason, 'complete');
-  assert.equal(plugin.state.articles[0].savedPath, 'saved.md');
-  assert.match(progress.at(-1).message, /分析 1 篇/);
-  assert.doesNotMatch(progress.at(-1).message, /-1/);
-  await plugin.refreshFeeds();
+  assert.equal(plugin.state.articles.find(item => item.id === 'recent'), undefined);
+  assert.equal(plugin.state.articles.find(item => item.id === 'old').analysis.Old.reason, 'old');
+  assert.equal(plugin.state.articles.find(item => item.id === 'manual').analysis.Old.reason, 'old');
+  assert.equal(plugin.state.analysisProfileFingerprint, profileReanalysis.researchProfileFingerprint(currentProfiles));
+  await plugin.refreshCuratedFeeds();
   assert.equal(analyses, 2);
-  assert.equal(plugin.running, false);
 });
 
 test('refresh checkpoints survive failure and the next refresh only analyzes unfinished papers', async () => {
@@ -116,7 +157,7 @@ test('refresh checkpoints survive failure and the next refresh only analyzes unf
     './rss': { fetchAllFeeds: async () => [paper('done', 'unread'), paper('pending', 'unread')] },
     './ai': { analyzeArticles: async (items, profiles, provider, size, progress, checkpoint) => {
       if (++calls === 1) {
-        await checkpoint([{ ...items[0], analysis: { A: { relevant: false, reason: 'complete' } }, matchedProfiles: [] }]);
+        await checkpoint([{ ...items[0], analysis: { A: { relevant: true, reason: 'complete' } }, matchedProfiles: ['A'] }]);
         throw Error('missing pair');
       }
       assert.deepEqual(items.map(item => item.id), ['pending']);
@@ -125,10 +166,10 @@ test('refresh checkpoints survive failure and the next refresh only analyzes unf
   });
   let saved;
   plugin.saveState = async () => { saved = structuredClone(plugin.state.articles); };
-  await plugin.refreshFeeds();
+  await plugin.refreshCuratedFeeds();
   assert.equal(plugin.running, false);
   assert.equal(saved.find(item => item.id === 'done').analysis.A.reason, 'complete');
-  await plugin.refreshFeeds();
+  await plugin.refreshCuratedFeeds();
   assert.equal(calls, 2);
   assert.equal(plugin.state.articles.find(item => item.id === 'pending').curated, true);
 });
@@ -141,8 +182,8 @@ test('refresh ignores concurrent clicks and releases its lock after failure', as
     await new Promise(resolve => { release = resolve; });
     throw Error('offline');
   } } });
-  const first = plugin.refreshFeeds();
-  await plugin.refreshFeeds();
+  const first = plugin.refreshCuratedFeeds();
+  await plugin.refreshExploreFeeds();
   assert.equal(calls, 1);
   assert.ok(notices.includes('RSS 抓取任务正在运行'));
   release();

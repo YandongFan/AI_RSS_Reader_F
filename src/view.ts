@@ -85,7 +85,9 @@ export class AiRssView extends ItemView {
     const refreshIcon = refresh.createSpan();
     setIcon(refreshIcon, 'refresh-cw');
     refresh.prepend(refreshIcon);
-    refresh.addEventListener('click', () => void this.plugin.refreshFeeds());
+    refresh.addEventListener('click', () => void ((this.plugin.state.readerMode ?? 'curated') === 'explore'
+      ? this.plugin.refreshExploreFeeds()
+      : this.plugin.refreshCuratedFeeds()));
 
     if (this.progress) {
       const bar = root.createDiv({ cls: `ai-rss-progress ai-rss-progress-${this.progress.phase}` });

@@ -66,6 +66,7 @@ export interface AiRssSettings {
   keepIrrelevant: boolean;
   maxItemsPerFeed: number;
   batchSize: number;
+  profileReanalysisDays: number;
   readRetentionDays: number;
   unreadRetentionDays: number;
   outputFolder: string;
@@ -140,6 +141,7 @@ export interface PluginState {
   articles: RssArticle[];
   seenLinks: string[];
   lastFetchedAt: string;
+  analysisProfileFingerprint?: string;
   lastLiteratureSaveFolder: string;
   tableColumnWidths: TableColumnWidths;
   audioTutorPlaybackPositions: Record<string, number>;

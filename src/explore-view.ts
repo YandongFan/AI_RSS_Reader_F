@@ -143,7 +143,7 @@ export class ExploreView {
 
   private renderFeeds(root: HTMLElement): void {
     const toolbar = root.createDiv({ cls: 'ai-rss-table-toolbar' });
-    this.action(toolbar, '更新所有订阅', () => this.plugin.refreshFeeds());
+    this.action(toolbar, '更新所有订阅', () => this.plugin.refreshExploreFeeds());
     this.action(toolbar, '检测所有 RSS 源', async () => { const results = await this.plugin.checkAndExportFeeds(); new Notice(`检测 ${results.length} 个源，正常 ${results.filter(r => r.ok).length} 个`); });
     this.action(toolbar, '从本地导入 RSS 链接', async () => { await this.plugin.importLocalFeeds(); this.refresh(); });
     const name = root.createEl('input', { placeholder: '订阅名称', attr: { 'aria-label': '订阅名称' } });

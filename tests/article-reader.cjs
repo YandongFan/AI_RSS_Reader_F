@@ -127,7 +127,15 @@ test('reader renders five categories, image column, sorting and empty-basket und
   }
   const { AiRssView } = load('view', { obsidian: { ItemView: class {}, Modal, Setting, Notice: class {}, getIcon: icon => icon !== 'arrow-down-a-z', setIcon(element, icon) { element.dataset.icon = icon; }, setTooltip() {} } }, document);
   const articles = [...[paper('b', 'unread', 'Beta'), { ...paper('a', 'unread', 'Alpha'), imageUrl: 'https://example.org/figure.png' }].map(article => ({ ...article, curated: true })), paper('explore-only')];
-  const plugin = { state: { articles, settings: { profiles: [] } }, recommendationOptions: { disabledKeywords: [], lowThreshold: null, highThreshold: null, userInterest: '' }, canUndoStatus: true, saveState: async () => {} };
+  let curatedRefreshes = 0; let exploreRefreshes = 0;
+  const plugin = {
+    state: { articles, settings: { profiles: [] } },
+    recommendationOptions: { disabledKeywords: [], lowThreshold: null, highThreshold: null, userInterest: '' },
+    canUndoStatus: true,
+    saveState: async () => {},
+    refreshCuratedFeeds: async () => { curatedRefreshes++; },
+    refreshExploreFeeds: async () => { exploreRefreshes++; },
+  };
   const view = new AiRssView({}, plugin);
   view.contentEl = document.getElementById('root');
   view.render();
@@ -137,6 +145,8 @@ test('reader renders five categories, image column, sorting and empty-basket und
   assert.equal(root.querySelectorAll('tbody tr').length, 2);
   assert.equal(root.querySelectorAll('[role="tab"]').length, 2);
   assert.equal(root.querySelector('.ai-rss-recommendations'), null);
+  [...root.querySelectorAll('button')].find(button => button.textContent.includes('更新订阅')).click();
+  assert.equal(curatedRefreshes, 1); assert.equal(exploreRefreshes, 0);
   assert.match(root.querySelector('.ai-rss-preview-button').title, /放大查看/);
   root.querySelector('.ai-rss-preview-button').click();
   assert.equal(openedModal.contentEl.querySelector('h3').textContent, '摘要图');
@@ -175,6 +185,8 @@ test('reader renders five categories, image column, sorting and empty-basket und
   assert.equal(undo.disabled, false);
   assert.equal(root.querySelector('[data-metric="hidden"]').getAttribute('aria-pressed'), 'true');
   [...root.querySelectorAll('[role="tab"]')].find(tab => tab.textContent === '探索模式').click();
+  [...root.querySelectorAll('button')].find(button => button.textContent.includes('更新订阅')).click();
+  assert.equal(curatedRefreshes, 1); assert.equal(exploreRefreshes, 1);
   assert.equal(root.querySelectorAll('.ai-rss-explore-card').length, 1);
   assert.equal(root.querySelector('.ai-rss-explore-card h3').textContent, 'explore-only');
   assert.ok(root.querySelector('.ai-rss-recommendations'));

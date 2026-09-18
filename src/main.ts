@@ -3,6 +3,7 @@ import { addZoteroFileMenu } from './zotero-import';
 import { checkAllFeeds, type FeedHealthResult } from './feed-health';
 import { articleStatus, setArticleStatus, isCurated, recommendationArticles } from './article-state';
 import { buildRecommendations, recommendationFingerprint } from './recommendation';
+import { mergeAnalysisCandidates, recentRssArticles, researchProfileFingerprint } from './profile-reanalysis';
 import type { ArticleStatus } from './types';
 import { MarkdownView, Menu, Notice, Plugin, normalizePath, TAbstractFile, TFile, TFolder } from 'obsidian';
 import { EzProxyLogin, clearProxyCookies, bypassEzProxy } from './ezproxy';
@@ -75,7 +76,7 @@ export default class AiRssReaderPlugin extends Plugin {
     this.addRibbonIcon('rss', '打开 AI RSS Reader F', () => void this.activateView());
     this.addCommand({ id: 'open-ai-rss-reader', name: '打开阅读器', callback: () => void this.activateView() });
     this.addCommand({ id: 'open-literature-link', name: '通过链接 / DOI 查看文献详情', callback: () => this.openLiteratureInput() });
-    this.addCommand({ id: 'fetch-and-analyze-rss', name: '抓取并分析 RSS', callback: () => void this.refreshFeeds() });
+    this.addCommand({ id: 'fetch-and-analyze-rss', name: '更新精选文章订阅', callback: () => void this.refreshCuratedFeeds() });
     this.addAudioTutorCommands();
     this.addCommand({
       id: 'convert-active-pdf-with-mineru',
@@ -117,6 +118,7 @@ export default class AiRssReaderPlugin extends Plugin {
     const saved = (await this.loadData()) as Partial<PluginState> | null;
     const savedSettings = saved?.settings;
     const needsProviderMigration = PROVIDER_KINDS.some((kind) => !savedSettings?.providerConfigs?.[kind]);
+    const needsProfileFingerprintMigration = typeof saved?.analysisProfileFingerprint !== 'string';
     const providerConfigs = normalizeProviderConfigs(savedSettings?.provider, savedSettings?.providerConfigs);
     const providerKind = isProviderKind(savedSettings?.provider?.kind) ? savedSettings.provider.kind : DEFAULT_SETTINGS.provider.kind;
     this.state = {
@@ -140,9 +142,12 @@ export default class AiRssReaderPlugin extends Plugin {
     };
     if (this.state.tableColumnWidths.preview === 140) this.state.tableColumnWidths.preview = 260;
     if (this.state.tableColumnWidths.source === 156) this.state.tableColumnWidths.source = 220;
+    if (needsProfileFingerprintMigration) {
+      this.state.analysisProfileFingerprint = researchProfileFingerprint(this.state.settings.profiles);
+    }
     const pruned = pruneExpiredArticles(this.state.articles, this.state.settings);
     this.state.articles = pruned.articles;
-    if (pruned.changed || needsProviderMigration) await this.saveData(this.state);
+    if (pruned.changed || needsProviderMigration || needsProfileFingerprintMigration) await this.saveData(this.state);
   }
 
   async saveState(): Promise<void> {
@@ -185,7 +190,7 @@ export default class AiRssReaderPlugin extends Plugin {
     return this.app.workspace.getLeavesOfType(AI_RSS_VIEW)[0]?.view as AiRssView | undefined;
   }
 
-  async refreshFeeds(): Promise<void> {
+  async refreshCuratedFeeds(): Promise<void> {
     if (this.running) {
       new Notice('RSS 抓取任务正在运行');
       return;
@@ -209,20 +214,24 @@ export default class AiRssReaderPlugin extends Plugin {
       });
 
       const fetchedByLink = new Map(fetched.map(article => [article.link, article]));
-      for (const article of this.state.articles) {
+      for (const article of this.state.articles.filter(isCurated)) {
         const latest = fetchedByLink.get(article.link);
         if (latest) { article.imageUrl = latest.imageUrl || article.imageUrl; article.updatedAt = latest.updatedAt; }
       }
-      const existing = new Set(this.state.articles.map(article => article.link));
-      const fresh = fetched.filter(article => article.link && !existing.has(article.link)).map(article => ({ ...article, curated: false }));
-      this.state.articles = [...fresh, ...this.state.articles];
-      await this.saveState();
       const profiles = this.state.settings.profiles.filter((profile) => profile.enabled);
-      const pending = this.state.articles.filter(article => !isCurated(article) && Object.keys(article.analysis ?? {}).length === 0);
-      report({ phase: 'filter', message: `发现 ${fresh.length} 篇新文章，${pending.length} 篇待分析，正在预筛…`, current: 0, total: pending.length });
-      const candidates = this.state.settings.keywordFilter
-        ? keywordPrefilter(pending, profiles.map((profile) => `${profile.name} ${profile.description}`))
-        : pending;
+      const profileFingerprint = researchProfileFingerprint(this.state.settings.profiles);
+      const profilesChanged = profileFingerprint !== this.state.analysisProfileFingerprint;
+      const existingByLink = new Map(this.state.articles.map(article => [article.link, article]));
+      const fetchedCandidates = fetched
+        .filter(article => !isCurated(existingByLink.get(article.link) ?? article))
+        .map(article => ({ ...article, curated: false }));
+      const pendingCandidates = this.state.settings.keywordFilter
+        ? keywordPrefilter(fetchedCandidates, profiles.map((profile) => `${profile.name} ${profile.description}`))
+        : fetchedCandidates;
+      const recent = profilesChanged ? recentRssArticles(this.state.articles.filter(isCurated), this.state.settings.profileReanalysisDays) : [];
+      const candidates = mergeAnalysisCandidates(recent, pendingCandidates);
+      const reanalysisMessage = profilesChanged ? `；研究方向已变化，重分析近 ${this.state.settings.profileReanalysisDays} 天的 ${recent.length} 篇文章` : '';
+      report({ phase: 'filter', message: `发现 ${fetchedCandidates.length} 篇待筛选文章${reanalysisMessage}，正在预筛…`, current: 0, total: candidates.length });
 
       let analyzed: RssArticle[] = candidates;
       if (candidates.length > 0) {
@@ -234,43 +243,100 @@ export default class AiRssReaderPlugin extends Plugin {
           this.state.settings.batchSize,
           (current, total) => report({ phase: 'analysis', message: `AI 分析批次 ${current}/${total}`, current, total }),
           async completed => {
-            const results = new Map(completed.map(article => [article.link, article]));
-            this.state.articles = this.state.articles.map(article => {
-              const result = results.get(article.link);
-              return result ? { ...article, analysis: result.analysis, matchedProfiles: result.matchedProfiles, curated: result.matchedProfiles.length > 0 } : article;
-            });
+            this.mergeCuratedResults(completed);
             await this.saveState();
           },
         );
       }
 
-      const kept = analyzed.map(article => ({ ...article, curated: article.matchedProfiles.length > 0 }));
-      const oldByLink = new Map(this.state.articles.map((article) => [article.link, article]));
-      const merged = kept.map((article) => {
-        const old = oldByLink.get(article.link);
-        return old ? { ...article, read: old.read, readAt: old.readAt, savedPath: old.savedPath, status: old.status, statusChangedAt: old.statusChangedAt, imageUrl: article.imageUrl || old.imageUrl } : article;
-      });
+      this.mergeCuratedResults(analyzed);
+      const curatedCount = analyzed.filter(article => article.matchedProfiles.length > 0).length;
       const newLinks = fetched.map((article) => article.link).filter(Boolean);
-      this.state.articles = [...merged, ...this.state.articles.filter((article) => !merged.some((item) => item.link === article.link))];
       this.state.seenLinks = [...new Set([...newLinks, ...this.state.seenLinks])].slice(0, 50000);
       this.state.lastFetchedAt = new Date().toISOString();
+      this.state.analysisProfileFingerprint = profileFingerprint;
       report({ phase: 'saving', message: '正在保存结果…', current: 1, total: 1 });
       await this.saveState();
-      report({ phase: 'done', message: `完成：新增 ${fresh.length} 篇，分析 ${analyzed.length} 篇，精选 ${kept.filter(isCurated).length} 篇${failures.length ? `；${failures.length} 个源失败` : ''}`, current: 1, total: 1 });
+      report({ phase: 'done', message: `精选更新完成：分析 ${analyzed.length} 篇，精选 ${curatedCount} 篇${failures.length ? `；${failures.length} 个源失败` : ''}`, current: 1, total: 1 });
       this.getView()?.render();
       const suffix = failures.length > 0 ? `；${failures.length} 个源失败` : '';
-      new Notice(`RSS 更新完成：${fresh.length} 篇新文章，${kept.filter(isCurated).length} 篇精选${suffix}`, 7000);
+      new Notice(`精选文章更新完成：分析 ${analyzed.length} 篇，精选 ${curatedCount} 篇${suffix}`, 7000);
       if (failures.length > 0) console.warn('AI RSS Reader feed failures', failures);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       report({ phase: 'done', message: `失败：${message}`, current: 0, total: 1 });
-      new Notice(`RSS 更新失败：${message}`, 10000);
+      new Notice(`精选文章更新失败：${message}`, 10000);
     } finally {
       this.running = false;
-      const training = recommendationArticles(this.state.articles);
-      if (!this.disposed && training.filter(article => ['interested', 'archived'].includes(articleStatus(article))).length >= 2
-        && training.filter(article => ['hidden', 'expired'].includes(articleStatus(article))).length >= 2) await this.updateRecommendations();
     }
+  }
+
+  async refreshExploreFeeds(): Promise<void> {
+    if (this.running) {
+      new Notice('RSS 抓取任务正在运行');
+      return;
+    }
+    const enabledFeeds = this.state.settings.feeds.filter(feed => feed.enabled);
+    if (enabledFeeds.length === 0) {
+      new Notice('请先在设置中启用至少一个 RSS 源');
+      return;
+    }
+
+    this.running = true;
+    const report = (progress: FetchProgress): void => this.getView()?.setProgress(progress);
+    try {
+      let finished = 0;
+      const failures: string[] = [];
+      report({ phase: 'feeds', message: '正在抓取探索模式订阅源…', current: 0, total: enabledFeeds.length });
+      const fetched = await fetchAllFeeds(enabledFeeds, this.state.settings.maxItemsPerFeed, (feed, error) => {
+        finished += 1;
+        if (error) failures.push(`${feed.name}: ${error}`);
+        report({ phase: 'feeds', message: `已检查 ${feed.name}`, current: finished, total: enabledFeeds.length });
+      });
+
+      const fetchedByLink = new Map(fetched.map(article => [article.link, article]));
+      for (const article of this.state.articles.filter(article => !isCurated(article))) {
+        const latest = fetchedByLink.get(article.link);
+        if (latest) { article.imageUrl = latest.imageUrl || article.imageUrl; article.updatedAt = latest.updatedAt; }
+      }
+      const existing = new Set(this.state.articles.map(article => article.link));
+      const fresh = fetched.filter(article => article.link && !existing.has(article.link)).map(article => ({ ...article, curated: false }));
+      this.state.articles = [...fresh, ...this.state.articles];
+      const newLinks = fetched.map(article => article.link).filter(Boolean);
+      this.state.seenLinks = [...new Set([...newLinks, ...this.state.seenLinks])].slice(0, 50000);
+      this.state.lastFetchedAt = new Date().toISOString();
+      report({ phase: 'saving', message: '正在保存探索文章…', current: 1, total: 1 });
+      await this.saveState();
+      const suffix = failures.length > 0 ? `；${failures.length} 个源失败` : '';
+      report({ phase: 'done', message: `探索更新完成：新增 ${fresh.length} 篇${suffix}`, current: 1, total: 1 });
+      this.getView()?.render();
+      new Notice(`探索模式更新完成：新增 ${fresh.length} 篇${suffix}`, 7000);
+      if (failures.length > 0) console.warn('AI RSS Reader exploration feed failures', failures);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      report({ phase: 'done', message: `失败：${message}`, current: 0, total: 1 });
+      new Notice(`探索模式更新失败：${message}`, 10000);
+    } finally {
+      this.running = false;
+    }
+  }
+
+  private mergeCuratedResults(results: RssArticle[]): void {
+    const byLink = new Map(results.map(article => [article.link, article]));
+    const merged: RssArticle[] = [];
+    for (const article of this.state.articles) {
+      const result = byLink.get(article.link);
+      if (!result) {
+        merged.push(article);
+      } else if (result.matchedProfiles.length > 0) {
+        merged.push({ ...result, curated: true, read: article.read, readAt: article.readAt, savedPath: article.savedPath, status: article.status, statusChangedAt: article.statusChangedAt, imageUrl: result.imageUrl || article.imageUrl });
+      } else if (!isCurated(article)) {
+        merged.push(article);
+      }
+      byLink.delete(article.link);
+    }
+    merged.unshift(...[...byLink.values()].filter(article => article.matchedProfiles.length > 0).map(article => ({ ...article, curated: true })));
+    this.state.articles = merged;
   }
 
   get recommendationOptions() {

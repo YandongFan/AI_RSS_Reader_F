@@ -26,6 +26,7 @@ export const DEFAULT_SETTINGS: AiRssSettings = {
   keepIrrelevant: false,
   maxItemsPerFeed: 50,
   batchSize: 8,
+  profileReanalysisDays: 1,
   readRetentionDays: 30,
   unreadRetentionDays: 90,
   outputFolder: 'AI RSS Reader',

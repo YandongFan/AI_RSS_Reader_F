@@ -170,6 +170,15 @@ export class AiRssSettingTab extends PluginSettingTab {
       row.addExtraButton((button) => button.setIcon('trash-2').setTooltip('删除').onClick(async () => { settings.profiles = settings.profiles.filter((item) => item.id !== profile.id); await this.plugin.saveState(); this.display(); }));
     });
     new Setting(containerEl).addButton((button) => button.setButtonText('添加研究方向').setCta().onClick(() => new ProfileModal(this.plugin, undefined, () => this.display()).open()));
+    new Setting(containerEl).setName('方向变更后重分析天数').setDesc('研究方向的名称、描述、启用状态或数量变化后，下次“更新订阅”重新分析最近这些天内从 RSS 获取的文章。默认 1 天；0 表示关闭。').addText((input) => {
+      input.inputEl.type = 'number'; input.inputEl.min = '0'; input.inputEl.max = '36500'; input.inputEl.step = '1';
+      input.setValue(String(settings.profileReanalysisDays));
+      input.inputEl.addEventListener('change', () => void (async () => {
+        settings.profileReanalysisDays = clamp(input.getValue(), 0, 36500, 1);
+        input.setValue(String(settings.profileReanalysisDays));
+        await this.plugin.saveState();
+      })());
+    });
 
     containerEl.createEl('h2', { text: '处理与输出' });
     new Setting(containerEl).setName('关键词预筛').setDesc('先按研究方向关键词过滤，再调用模型；可显著减少 API 消耗。').addToggle((toggle) => toggle.setValue(settings.keywordFilter).onChange(async (value) => { settings.keywordFilter = value; await this.plugin.saveState(); }));
