@@ -97,9 +97,40 @@ test('curated refresh preserves exploration entries and only adds matched articl
   await plugin.refreshCuratedFeeds();
   assert.deepEqual(plugin.state.articles.map(item => item.id).sort(), ['explore', 'match']);
   assert.equal(state.isCurated(plugin.state.articles.find(item => item.id === 'match')), true);
+  assert.ok(Date.parse(plugin.state.articles.find(item => item.id === 'match').updatedAt) > 0);
   assert.equal(state.isCurated(plugin.state.articles.find(item => item.id === 'explore')), false);
   assert.equal(recommendationCalls, 0);
-  assert.match(progress.at(-1).message, /精选更新完成/);
+  assert.match(progress.at(-1).message, /精选更新完成：分析 2 篇，新增精选 1 篇，更新已有 0 篇/);
+});
+
+test('curated refresh leaves unchanged existing feed entries byte-for-byte intact', async () => {
+  const original = { ...paper('existing', 'unread', 'Stable title'), curated: true, matchedProfiles: ['A'], summary: 'Stable summary', authors: 'Author', published: '2026-09-01', source: 'Journal', imageUrl: 'https://example.org/image.png', updatedAt: '2026-09-02T03:04:05.000Z', fetchedAt: '2026-09-01T00:00:00.000Z' };
+  const fetched = { ...original, curated: undefined, matchedProfiles: [], analysis: {}, updatedAt: '2026-10-21T12:00:00.000Z', fetchedAt: '2026-10-21T12:00:00.000Z' };
+  const { plugin } = pluginHarness({
+    './rss': { fetchAllFeeds: async () => [fetched] },
+    './ai': { analyzeArticles: async () => { throw Error('existing curated article must not be analyzed'); } },
+  });
+  plugin.state.articles = [structuredClone(original)];
+  plugin.state.analysisProfileFingerprint = profileReanalysis.researchProfileFingerprint([]);
+  await plugin.refreshCuratedFeeds();
+  assert.deepEqual(plugin.state.articles[0], original);
+});
+
+test('curated refresh updates changed feed details and timestamps the real change', async () => {
+  const original = { ...paper('changed', 'unread', 'Old title'), curated: true, matchedProfiles: ['A'], summary: 'Old summary', authors: 'Author', published: '2026-09-01', source: 'Journal', imageUrl: 'https://example.org/old.png', updatedAt: '2026-09-02T03:04:05.000Z', fetchedAt: '2026-09-01T00:00:00.000Z' };
+  const fetched = { ...original, title: 'New title', summary: 'New summary', imageUrl: 'https://example.org/new.png', updatedAt: '2026-10-21T12:00:00.000Z', fetchedAt: '2026-10-21T12:00:00.000Z' };
+  const progress = [];
+  const { plugin } = pluginHarness({ './rss': { fetchAllFeeds: async () => [fetched] } });
+  plugin.state.articles = [structuredClone(original)];
+  plugin.state.analysisProfileFingerprint = profileReanalysis.researchProfileFingerprint([]);
+  plugin.getView = () => ({ setProgress: value => progress.push(value), render() {} });
+  await plugin.refreshCuratedFeeds();
+  assert.equal(plugin.state.articles[0].title, 'New title');
+  assert.equal(plugin.state.articles[0].summary, 'New summary');
+  assert.equal(plugin.state.articles[0].imageUrl, 'https://example.org/new.png');
+  assert.ok(Date.parse(plugin.state.articles[0].updatedAt) > Date.parse(original.updatedAt));
+  assert.equal(plugin.state.articles[0].fetchedAt, original.fetchedAt);
+  assert.match(progress.at(-1).message, /新增精选 0 篇，更新已有 1 篇/);
 });
 
 test('exploration refresh stores feed articles without AI analysis or recommendation work', async () => {

@@ -203,6 +203,7 @@ export default class AiRssReaderPlugin extends Plugin {
 
     this.running = true;
     const report = (progress: FetchProgress): void => this.getView()?.setProgress(progress);
+    const curatedBeforeRefresh = new Set(this.state.articles.filter(isCurated).map(article => article.link || article.id));
     try {
       let finished = 0;
       const failures: string[] = [];
@@ -214,9 +215,10 @@ export default class AiRssReaderPlugin extends Plugin {
       });
 
       const fetchedByLink = new Map(fetched.map(article => [article.link, article]));
+      let updatedCuratedCount = 0;
       for (const article of this.state.articles.filter(isCurated)) {
         const latest = fetchedByLink.get(article.link);
-        if (latest) { article.imageUrl = latest.imageUrl || article.imageUrl; article.updatedAt = latest.updatedAt; }
+        if (latest && this.mergeChangedFeedDetails(article, latest)) updatedCuratedCount += 1;
       }
       const profiles = this.state.settings.profiles.filter((profile) => profile.enabled);
       const profileFingerprint = researchProfileFingerprint(this.state.settings.profiles);
@@ -250,17 +252,17 @@ export default class AiRssReaderPlugin extends Plugin {
       }
 
       this.mergeCuratedResults(analyzed);
-      const curatedCount = analyzed.filter(article => article.matchedProfiles.length > 0).length;
+      const newlyCuratedCount = this.state.articles.filter(article => isCurated(article) && !curatedBeforeRefresh.has(article.link || article.id)).length;
       const newLinks = fetched.map((article) => article.link).filter(Boolean);
       this.state.seenLinks = [...new Set([...newLinks, ...this.state.seenLinks])].slice(0, 50000);
       this.state.lastFetchedAt = new Date().toISOString();
       this.state.analysisProfileFingerprint = profileFingerprint;
       report({ phase: 'saving', message: '正在保存结果…', current: 1, total: 1 });
       await this.saveState();
-      report({ phase: 'done', message: `精选更新完成：分析 ${analyzed.length} 篇，精选 ${curatedCount} 篇${failures.length ? `；${failures.length} 个源失败` : ''}`, current: 1, total: 1 });
+      report({ phase: 'done', message: `精选更新完成：分析 ${analyzed.length} 篇，新增精选 ${newlyCuratedCount} 篇，更新已有 ${updatedCuratedCount} 篇${failures.length ? `；${failures.length} 个源失败` : ''}`, current: 1, total: 1 });
       this.getView()?.render();
       const suffix = failures.length > 0 ? `；${failures.length} 个源失败` : '';
-      new Notice(`精选文章更新完成：分析 ${analyzed.length} 篇，精选 ${curatedCount} 篇${suffix}`, 7000);
+      new Notice(`精选文章更新完成：分析 ${analyzed.length} 篇，新增精选 ${newlyCuratedCount} 篇，更新已有 ${updatedCuratedCount} 篇${suffix}`, 7000);
       if (failures.length > 0) console.warn('AI RSS Reader feed failures', failures);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -329,14 +331,29 @@ export default class AiRssReaderPlugin extends Plugin {
       if (!result) {
         merged.push(article);
       } else if (result.matchedProfiles.length > 0) {
-        merged.push({ ...result, curated: true, read: article.read, readAt: article.readAt, savedPath: article.savedPath, status: article.status, statusChangedAt: article.statusChangedAt, imageUrl: result.imageUrl || article.imageUrl });
+        merged.push({ ...result, curated: true, read: article.read, readAt: article.readAt, savedPath: article.savedPath, status: article.status, statusChangedAt: article.statusChangedAt, imageUrl: result.imageUrl || article.imageUrl, updatedAt: isCurated(article) ? article.updatedAt : new Date().toISOString() });
       } else if (!isCurated(article)) {
         merged.push(article);
       }
       byLink.delete(article.link);
     }
-    merged.unshift(...[...byLink.values()].filter(article => article.matchedProfiles.length > 0).map(article => ({ ...article, curated: true })));
+    merged.unshift(...[...byLink.values()].filter(article => article.matchedProfiles.length > 0).map(article => ({ ...article, curated: true, updatedAt: new Date().toISOString() })));
     this.state.articles = merged;
+  }
+
+  private mergeChangedFeedDetails(article: RssArticle, latest: RssArticle): boolean {
+    const details = {
+      title: latest.title || article.title,
+      summary: latest.summary || article.summary,
+      authors: latest.authors || article.authors,
+      published: latest.published || article.published,
+      source: latest.source || article.source,
+      imageUrl: latest.imageUrl || article.imageUrl,
+    };
+    const changed = Object.entries(details).some(([key, value]) => article[key as keyof typeof details] !== value);
+    if (!changed) return false;
+    Object.assign(article, details, { updatedAt: new Date().toISOString() });
+    return true;
   }
 
   get recommendationOptions() {
