@@ -1,6 +1,6 @@
 {
   "name": "obsidian-ai-rss-reader-f",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Read, filter, and analyze RSS feeds with AI inside Obsidian.",
   "author": "zflou <zflouzhejiang@gmail.com>",
   "main": "main.js",

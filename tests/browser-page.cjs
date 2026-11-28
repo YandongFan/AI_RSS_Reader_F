@@ -39,6 +39,19 @@ test('recognizes exact publisher article and proxy URL, excluding login and othe
   assert.equal(matchesArticle(proxy.replace('www-nature-com', 'evil'), target, prefix), false);
 });
 
+test('matches the same Optica article across RSS abstract and restored full-text URLs', () => {
+  const abstract = 'https://opg.optica.org/abstract.cfm?URI=prj-14-11-4647';
+  const full = 'https://opg.optica.org/prj/fulltext.cfm?uri=prj-14-11-4647';
+  const proxied = full.replace('opg.optica.org', 'opg-optica-org.sutd.idm.oclc.org');
+  for (const current of [abstract, full, proxied, `${full}&utm_source=rss`]) {
+    for (const expected of [abstract, full, proxied]) assert.equal(matchesArticle(current, expected, prefix), true);
+  }
+  for (const current of [full.replace('4647', '4648'), full.replace('opg.optica.org', 'evil.example'),
+    full.replace('fulltext.cfm', 'supplement.cfm'), `${prefix}/login?url=${abstract}`]) {
+    assert.equal(matchesArticle(current, abstract, prefix), false, current);
+  }
+});
+
 test('matches Nature DOI redirects to direct and EZProxy publisher pages without accepting lookalikes', () => {
   const doi = 'https://doi.org/10.1038/s41586-026-10637-x';
   const nature = 'https://www.nature.com/articles/s41586-026-10637-x';
@@ -165,6 +178,31 @@ test('reuses an existing tab but still requires confirmation', async () => {
   assert.equal(t.reads, 0);
   t.buttons()[0].click();
   await pending;
+});
+
+test('a restored Start click captures the exact chosen duplicate tab without navigation or focus changes', async () => {
+  const t = setup(target, 'Older duplicate', true);
+  const chosen = tab(target, 'Chosen restored article');
+  t.app.workspace.getLeavesOfType = () => [t.leaf, chosen];
+  t.app.setting = { close() { throw Error('must preserve open settings'); } };
+  const page = await ensureBrowserArticle(t.app, target, '', undefined, {
+    leaf: chosen, startImmediately: true, outputFolder: 'Restored/Papers',
+  });
+  assert.match(page.html, /Chosen restored article/);
+  assert.equal(page.outputFolder, 'Restored/Papers');
+  assert.equal(t.reads, 0);
+  assert.equal(t.revealed, undefined);
+  assert.equal(t.opened, undefined);
+});
+
+test('restoring a closed tab cannot silently open or capture a replacement', async () => {
+  const t = setup(target, 'article', true);
+  const removed = tab(target, 'Closed article');
+  await assert.rejects(ensureBrowserArticle(t.app, target, '', undefined, {
+    leaf: removed, startImmediately: true,
+  }), /已关闭/);
+  assert.equal(t.reads, 0);
+  assert.equal(t.opened, undefined);
 });
 
 test('automatic batch mode captures without a click and exposes closing the exact browser tab', async () => {

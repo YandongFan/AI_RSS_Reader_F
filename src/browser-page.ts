@@ -1,4 +1,4 @@
-import { Notice, type App, type View } from 'obsidian';
+import { Notice, type App, type View, type WorkspaceLeaf } from 'obsidian';
 import { bypassEzProxy, proxyUrl } from './ezproxy';
 import { normalizeLiteratureSaveFolder } from './literature-input';
 
@@ -18,6 +18,10 @@ export interface BrowserCaptureOptions {
   background?: boolean;
   /** Vault-relative root folder shown in the manual capture bar. */
   outputFolder?: string;
+  /** Reuse the exact restored tab without navigating or changing focus. */
+  leaf?: WorkspaceLeaf;
+  /** The user already clicked Start in the restored tab's controls. */
+  startImmediately?: boolean;
 }
 
 function articleWebview(view: View): Webview | undefined {
@@ -26,6 +30,53 @@ function articleWebview(view: View): Webview | undefined {
     if (candidate && typeof candidate.getURL === 'function' && typeof candidate.executeJavaScript === 'function') return candidate as Webview;
   }
   return undefined;
+}
+
+export function browserArticleUrl(view: View): string {
+  let current = '';
+  try { current = articleWebview(view)?.getURL() || ''; } catch { /* Webview may not be attached yet. */ }
+  if (!current || current === 'about:blank') {
+    try {
+      const saved = view.getState?.().url;
+      current = typeof saved === 'string' ? saved : '';
+    } catch { return ''; }
+  }
+  try {
+    const url = new URL(current);
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.href : '';
+  } catch { return ''; }
+}
+
+export function createCaptureBar(container: HTMLElement, outputFolder?: string) {
+  container.querySelectorAll('.ai-rss-capture-bar[data-ai-rss-restored]').forEach(restored => {
+    restored.removeAttribute('data-ai-rss-restored');
+    restored.remove();
+  });
+  const banner = container.ownerDocument.createElement('div');
+  banner.className = 'ai-rss-capture-bar';
+  const start = banner.appendChild(container.ownerDocument.createElement('button'));
+  start.type = 'button';
+  start.className = 'mod-cta';
+  start.textContent = '开始抓取';
+  const cancel = banner.appendChild(container.ownerDocument.createElement('button'));
+  cancel.type = 'button';
+  cancel.textContent = '取消';
+  let folderInput: HTMLInputElement | undefined;
+  if (outputFolder !== undefined) {
+    const folderLabel = banner.appendChild(container.ownerDocument.createElement('label'));
+    folderLabel.className = 'ai-rss-capture-folder';
+    const folderText = folderLabel.appendChild(container.ownerDocument.createElement('span'));
+    folderText.textContent = '保存到';
+    folderInput = folderLabel.appendChild(container.ownerDocument.createElement('input'));
+    folderInput.type = 'text';
+    folderInput.value = outputFolder || 'AI RSS Reader';
+    folderInput.placeholder = '库内相对路径';
+    folderInput.setAttribute('aria-label', '文献保存根目录');
+  }
+  const status = banner.appendChild(container.ownerDocument.createElement('span'));
+  status.setAttribute('role', 'status');
+  container.prepend(banner);
+  return { banner, start, cancel, folderInput, status };
 }
 
 export async function ensureBrowserArticle(app: App, target: string, prefix = '', signal?: AbortSignal, options: BrowserCaptureOptions = {}): Promise<BrowserPage> {
@@ -42,7 +93,9 @@ export async function ensureBrowserArticle(app: App, target: string, prefix = ''
   const url = prefix ? proxyUrl(target, prefix) : target;
   const previousLeaf = app.workspace.activeLeaf;
   const background = options.background === true;
-  let leaf = leaves.find((item) => {
+  let leaf = options.leaf;
+  if (leaf && (!leaves.includes(leaf) || leaf.isDeferred)) throw new Error('论文页面已关闭或尚未恢复，请打开该标签后重试');
+  leaf ??= leaves.find((item) => {
     try {
       const current = articleWebview(item.view)?.getURL();
       return current && (current === url || matchesArticle(current, target, prefix));
@@ -53,12 +106,14 @@ export async function ensureBrowserArticle(app: App, target: string, prefix = ''
     try { await leaf.setViewState({ type: 'webviewer', active: !background, state: { url, navigate: true } }); }
     catch (error) { leaf.detach(); throw error; }
   }
-  if (background) {
-    if (previousLeaf && previousLeaf !== leaf) await app.workspace.revealLeaf(previousLeaf);
-  } else {
-    await app.workspace.revealLeaf(leaf);
+  if (!options.leaf) {
+    if (background) {
+      if (previousLeaf && previousLeaf !== leaf) await app.workspace.revealLeaf(previousLeaf);
+    } else {
+      await app.workspace.revealLeaf(leaf);
+    }
+    browserApp.setting?.close();
   }
-  browserApp.setting?.close();
   if (signal?.aborted) throw new Error('已取消文献采集');
   if (!app.workspace.getLeavesOfType('webviewer').includes(leaf)) throw new Error('论文页面已关闭，已取消保存');
   const articleLeaf = leaf;
@@ -68,35 +123,13 @@ export async function ensureBrowserArticle(app: App, target: string, prefix = ''
   return new Promise<BrowserPage>((resolve, reject) => {
     // Keep controls in Obsidian, outside the publisher DOM and captured HTML.
     const container = articleLeaf.view.containerEl;
-    const banner = container.ownerDocument.createElement('div');
-    banner.className = 'ai-rss-capture-bar';
-    const start = banner.appendChild(container.ownerDocument.createElement('button'));
-    start.type = 'button';
-    start.className = 'mod-cta';
-    start.textContent = '开始抓取';
-    const cancel = banner.appendChild(container.ownerDocument.createElement('button'));
-    cancel.type = 'button';
-    cancel.textContent = '取消';
-    let folderInput: HTMLInputElement | undefined;
-    if (!options.automatic) {
-      const folderLabel = banner.appendChild(container.ownerDocument.createElement('label'));
-      folderLabel.className = 'ai-rss-capture-folder';
-      const folderText = folderLabel.appendChild(container.ownerDocument.createElement('span'));
-      folderText.textContent = '保存到';
-      folderInput = folderLabel.appendChild(container.ownerDocument.createElement('input'));
-      folderInput.type = 'text';
-      folderInput.value = options.outputFolder || 'AI RSS Reader';
-      folderInput.placeholder = '库内相对路径';
-      folderInput.setAttribute('aria-label', '文献保存根目录');
-    }
-    const status = banner.appendChild(container.ownerDocument.createElement('span'));
-    status.setAttribute('role', 'status');
+    const { banner, start, cancel, folderInput, status } = createCaptureBar(container,
+      options.automatic ? undefined : options.outputFolder || 'AI RSS Reader');
     status.textContent = options.automatic
       ? '批量自动抓取：正在等待论文正文加载完整…'
       : prefix
         ? '等待确认：请完成机构登录，确认正文加载完整后点击“开始抓取”。'
         : '等待确认：请确认正文加载完整后点击“开始抓取”。';
-    container.prepend(banner);
     let finished = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let automaticTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -189,6 +222,7 @@ export async function ensureBrowserArticle(app: App, target: string, prefix = ''
       }, 60000);
     }
     if (signal?.aborted) abort();
+    else if (options.startImmediately && !options.automatic) capture();
   });
 }
 
@@ -234,6 +268,17 @@ export function matchesArticle(currentUrl: string, targetUrl: string, prefix = '
       const proxy = new URL(prefix.replace('$@', ''));
       hosts.push(`${target.hostname.replace(/\./g, '-')}.${proxy.hostname}`, `${target.hostname}.${proxy.hostname}`);
     }
+    const opticaId = (url: URL): string => {
+      const proxyHost = prefix ? new URL(prefix.replace('$@', '')).hostname : '';
+      if (!['opg.optica.org', ...(proxyHost ? [`opg-optica-org.${proxyHost}`, `opg.optica.org.${proxyHost}`] : [])].includes(url.hostname) ||
+          !/^\/(?:[a-z]+\/)?(?:abstract|fulltext)\.cfm$/i.test(url.pathname)) return '';
+      for (const [key, value] of url.searchParams) {
+        if (key.toLowerCase() === 'uri' && /^[a-z]+-\d+-\d+-\d+$/i.test(value)) return value.toLowerCase();
+      }
+      return '';
+    };
+    const targetOpticaId = opticaId(target);
+    if (targetOpticaId) return opticaId(current) === targetOpticaId;
     return hosts.includes(current.hostname) && current.pathname === target.pathname && current.search === target.search;
   } catch { return false; }
 }

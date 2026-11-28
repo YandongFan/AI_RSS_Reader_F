@@ -16,6 +16,10 @@ vm.runInNewContext(transformSync(readFileSync('src/literature-input.ts', 'utf8')
 const retentionModule = { exports: {} };
 vm.runInNewContext(require('esbuild').buildSync({ entryPoints: ['src/retention.ts'], bundle: true, write: false, platform: 'node', format: 'cjs' }).outputFiles[0].text,
   { module: retentionModule, exports: {}, require });
+const browserModule = { exports: {} };
+vm.runInNewContext(require('esbuild').buildSync({ entryPoints: ['src/browser-page.ts'], bundle: true, write: false,
+  platform: 'node', format: 'cjs', external: ['obsidian', 'electron'] }).outputFiles[0].text,
+  { module: browserModule, exports: {}, URL, require: () => ({}) });
 function setup(ezProxyEnabled) {
   const captureDeferreds = [];
   const calls = { capture: [], save: [], state: 0, opened: [], created: [], folders: [] };
@@ -35,7 +39,7 @@ function setup(ezProxyEnabled) {
     },
     './ezproxy': { EzProxyLogin: class {}, bypassEzProxy: url => new URL(url).hostname === 'arxiv.org' },
     './defaults': { DEFAULT_STATE: { settings }, DEFAULT_SETTINGS: settings },
-    './browser-page': { ensureBrowserArticle: (...args) => {
+    './browser-page': { browserArticleUrl: browserModule.exports.browserArticleUrl, matchesArticle: browserModule.exports.matchesArticle, ensureBrowserArticle: (...args) => {
       calls.capture.push(args);
       return new Promise((resolve, reject) => captureDeferreds.push({ resolve, reject }));
     } },
@@ -253,6 +257,45 @@ test('manual capture starts with the default folder and saves to the edited fold
   assert.equal(t.calls.save[0][2].outputFolder, 'Chosen/Folder');
   assert.equal(t.plugin.state.lastLiteratureSaveFolder, 'Chosen/Folder');
   assert.equal(t.plugin.state.settings.outputFolder, 'Default/RSS');
+});
+
+test('restored Optica tab uses its existing RSS record and leaves all saved data unchanged before capture', async () => {
+  const t = setup(false);
+  const article = { id: 'optica', title: 'Existing research', link: 'https://opg.optica.org/abstract.cfm?URI=prj-14-11-4647',
+    summary: 'Original abstract', source: 'Photonics Research', read: true, savedPath: 'Existing/paper.md',
+    matchedProfiles: ['Physics'], analysis: { Physics: { relevant: true, reason: 'Original reason' } } };
+  t.plugin.state.articles = [article];
+  t.plugin.state.settings.outputFolder = 'Original/Default';
+  const before = JSON.stringify(t.plugin.state);
+  const leaf = { view: { getState: () => ({ url: 'https://opg.optica.org/prj/fulltext.cfm?uri=prj-14-11-4647' }) } };
+  const pending = t.plugin.captureRestoredBrowserTab(leaf, 'Papers/Chosen');
+  assert.equal(t.calls.capture[0][1], article.link);
+  assert.equal(t.calls.capture[0][4].leaf, leaf);
+  assert.equal(t.calls.capture[0][4].startImmediately, true);
+  assert.equal(t.calls.capture[0][4].automatic, false);
+  assert.equal(t.calls.save.length, 0);
+  assert.equal(t.calls.state, 0);
+  assert.equal(JSON.stringify(t.plugin.state), before);
+  t.rejectCapture(Error('已取消文献采集'));
+  await assert.rejects(pending, /已取消/);
+  assert.equal(JSON.stringify(t.plugin.state), before);
+  assert.equal(t.calls.state, 0);
+});
+
+test('restored manual-import tabs wait for capture without adding or replacing article records', async () => {
+  const t = setup(false);
+  t.plugin.state.articles = [];
+  const before = JSON.stringify(t.plugin.state);
+  const url = 'https://example.org/manual-paper';
+  const leaf = { view: { getState: () => ({ url }) } };
+  const pending = t.plugin.captureRestoredBrowserTab(leaf, 'Papers/Manual');
+  assert.equal(t.calls.capture[0][1], url);
+  assert.equal(t.calls.capture[0][4].leaf, leaf);
+  assert.equal(t.calls.state, 0);
+  assert.equal(JSON.stringify(t.plugin.state), before);
+  t.rejectCapture(Error('已取消文献采集'));
+  await assert.rejects(pending, /已取消/);
+  assert.equal(JSON.stringify(t.plugin.state), before);
 });
 
 test('batch failures append to AI RSS Reader/faild.md only when no markdown exists', async () => {

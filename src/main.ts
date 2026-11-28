@@ -5,9 +5,10 @@ import { articleStatus, setArticleStatus, isCurated, recommendationArticles } fr
 import { buildRecommendations, recommendationFingerprint } from './recommendation';
 import { mergeAnalysisCandidates, recentRssArticles, researchProfileFingerprint } from './profile-reanalysis';
 import type { ArticleStatus } from './types';
-import { MarkdownView, Menu, Notice, Plugin, normalizePath, TAbstractFile, TFile, TFolder } from 'obsidian';
+import { MarkdownView, Menu, Notice, Plugin, normalizePath, TAbstractFile, TFile, TFolder, type WorkspaceLeaf } from 'obsidian';
 import { EzProxyLogin, clearProxyCookies, bypassEzProxy } from './ezproxy';
-import { ensureBrowserArticle } from './browser-page';
+import { browserArticleUrl, ensureBrowserArticle, matchesArticle, type BrowserCaptureOptions } from './browser-page';
+import { restoreBrowserCaptureControls } from './browser-recovery';
 import { DEFAULT_SETTINGS, DEFAULT_STATE } from './defaults';
 import { analyzeArticles, generateText } from './ai';
 import { fetchAllFeeds, keywordPrefilter } from './rss';
@@ -55,6 +56,8 @@ export default class AiRssReaderPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadState();
+    this.register(restoreBrowserCaptureControls(this.app, () => this.state.settings.outputFolder || 'AI RSS Reader',
+      (leaf, folder) => this.captureRestoredBrowserTab(leaf, folder)));
     this.audioTutor = new AudioTutorController(this);
     this.markdownTts = new MarkdownTtsPlayer({
       app: this.app,
@@ -612,7 +615,16 @@ export default class AiRssReaderPlugin extends Plugin {
     }
   }
 
-  async saveArticleAsNote(article: RssArticle, openNote = this.state.settings.openNoteAfterSingleSave, automaticCapture = false, outputFolder?: string): Promise<string> {
+  private async captureRestoredBrowserTab(leaf: WorkspaceLeaf, outputFolder: string): Promise<string> {
+    const url = browserArticleUrl(leaf.view);
+    if (!url) throw new Error('当前标签没有可抓取的论文网址，请等待页面加载后重试');
+    const article = this.state.articles.find(item => matchesArticle(url, item.link, this.state.settings.ezProxyPrefix))
+      ?? this.articleForLiteratureLink(url);
+    return this.saveArticleAsNote(article, undefined, false, outputFolder, { leaf, startImmediately: true });
+  }
+
+  async saveArticleAsNote(article: RssArticle, openNote = this.state.settings.openNoteAfterSingleSave, automaticCapture = false, outputFolder?: string,
+    captureOptions: Pick<BrowserCaptureOptions, 'leaf' | 'startImmediately'> = {}): Promise<string> {
     const captureKey = normalizedCaptureKey(article);
     if (this.captures.has(captureKey)) throw new Error('该文献已在等待抓取或正在保存');
     const controller = new AbortController();
@@ -624,13 +636,14 @@ export default class AiRssReaderPlugin extends Plugin {
         ? normalizeLiteratureSaveFolder(outputFolder)
         : normalizeLiteratureSaveFolder(settings.outputFolder || 'AI RSS Reader');
       if (bypassEzProxy(article.link)) settings.ezProxyEnabled = false;
-      const needsPage = settings.extractFullText || settings.downloadPdf || settings.downloadSupplementary || settings.downloadPeerReview;
+      const needsPage = captureOptions.leaf || settings.extractFullText || settings.downloadPdf || settings.downloadSupplementary || settings.downloadPeerReview;
       const page = needsPage
         ? await ensureBrowserArticle(this.app, article.link, settings.ezProxyEnabled ? settings.ezProxyPrefix : '', controller.signal, {
           automatic: automaticCapture,
           background: automaticCapture,
           retryIntervalMs: settings.batchCaptureIntervalSeconds * 1000,
           outputFolder: settings.outputFolder,
+          ...captureOptions,
         })
         : undefined;
       if (page?.outputFolder) {
